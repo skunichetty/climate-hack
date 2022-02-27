@@ -1,4 +1,3 @@
-from tabnanny import check
 import torch
 import os
 import uuid
@@ -8,39 +7,75 @@ from functools import reduce
 
 
 class ModelBase(torch.nn.Module):
-    def __init__(self, checkpoint_dir: Union[str, os.PathLike]):
-        super(ModelBase, self).__init__()
+    """
+    Extensible layer on top of `torch.nn.Module` to add certain amenities such as
+    - Inbuilt model loading and saving
+    - A more robust model summary generation (TensorFlow style)
+    Note: Only top level modules should extend this class - all other submodules should style defer to `torch.nn.Module`.
+    """
+
+    def __init__(self, checkpoint_dir: Union[str, os.PathLike], *args, **kwargs):
+        """
+        Initializes a model.
+
+        Args:
+            checkpoint_dir (Union[str, os.PathLike]): Directory to which models should be checkpointed
+        """
+        super(ModelBase, self).__init__(*args, **kwargs)
         if isinstance(checkpoint_dir, str):
             self.checkpoint_dir = pathlib.Path(checkpoint_dir)
         else:
             self.checkpoint_dir = checkpoint_dir
         self._param_count_cache = None
 
-    def save(self, *args, **kwargs):
+    def save(self, name: str = None, **metadata):
         """
-        Base class file to save model
+        Saves model parameters and metadata to file
+
+        Args:
+            name (str, optional): Name of model checkpoint. Default is randomly generated UUID.
         """
         if not self.checkpoint_dir.exists():
             self.checkpoint_dir.mkdir(parents=True)
-        id = uuid.uuid4()
+        if name is None:
+            name = uuid.uuid4()
         state = {
-            "id": id,
+            "id": name,
             "state_dict": self.state_dict(),
         }
-        for key in kwargs:
-            state[key] = kwargs[key]
-        filename = self.checkpoint_dir / f"{id}.checkpoint.pth.tar"
+        for key in metadata:
+            state[key] = metadata[key]
+        filename = self.checkpoint_dir / f"{name}.pth"
         torch.save(state, filename)
 
-    def _prettyprint(self, obj) -> str:
-        print("TEMP")
-        if isinstance(obj, torch.nn.Linear):
-            return f"Input Size - {obj.shape[0]}, Output Size - {obj.shape[1]}"
-        if isinstance(obj, torch.nn.Linear):
-            return f"Input Size - {obj.shape[0]}, Output Size - {obj.shape[1]}"
-        return obj.shape
+    def load(self, device: str = "cpu", id: str = None):
+        """
+        Loads model parameters from file
+
+        Args:
+            device (str, optional): Device to load parameters to. Defaults to "cpu".
+            id (str, optional): Name of the model checkpoint to load from checkpoint
+                                directory. If unspecified, loads the first available model.
+
+        Returns:
+            dict: Metadata associated with checkpoint
+        """
+        if id is None:
+            id = next(self.checkpoint_dir.iterdir()).stem
+        model_path = self.checkpoint_dir / f"{id}.pth"
+        with model_path.open("rb") as input:
+            checkpoint = torch.load(input, map_location=device)
+            self.load_state_dict(checkpoint["state_dict"])
+        return checkpoint
 
     def summary(self) -> str:
+        """
+        Generates model summary, specifying all submodules and the parameters associated with each
+        submodules.
+
+        Returns:
+            str: string model summary
+        """
         output = []
         length = 50
         count_condition = self._param_count_cache is None
@@ -69,3 +104,6 @@ class ModelBase(torch.nn.Module):
         output.append(f"Total Parameter Count: {self.parameter_count}")
         output.append("═" * length)
         return "\n".join(output)
+
+    def __repr__(self):
+        return self.summary()
