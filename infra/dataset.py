@@ -2,52 +2,73 @@ from math import ceil
 from typing import Iterator, T_co
 
 from torch.utils.data import IterableDataset
+from torchvision.transforms import CenterCrop, RandomCrop
+from collections import deque
 import pathlib
 import torch
-import numpy as np
+import concurrent.futures
+import logging
 
 
 class ClimateHackDataset(IterableDataset):
     def __init__(self, block_directory, cache_size=16, count=10000) -> None:
         super().__init__()
         self.block_dir = pathlib.Path(block_directory)
-        self.cached_blocks = [
-            torch.from_numpy(
-                np.load(self.block_dir / f"block{i+1}.npy")[0].astype(np.float32)
-            )
-            for i in range(cache_size)
-        ]
-        self.cache_size = cache_size
-        self.count = count
+        self.config = {
+            "cache_size": cache_size,
+            "num_examples": count,
+            "examples_per_crop": 36,
+            "num_crops": 28,
+            "max_example_idx": 596,
+        }
+        assert (
+            count
+            < self.config["max_example_idx"]
+            * self.config["num_crops"]
+            * self.config["examples_per_crop"]
+        )
+        self.window_start = 1
+        self.crop = RandomCrop(128)
+        self.center = CenterCrop(64)
+        self.count = 0
+        self.cache = deque([])
+        self.id = 0
 
-    def _bounds(self, cx, cy, length=128):
-        return cx - length // 2, cx + length // 2, cy - length // 2, cy + length // 2
+    def __len__(self):
+        return self.config["num_examples"]
 
-    def _gen_slice_bounds(self, count=10000):
-        centers = np.random.randint(128, 385, (count, 2))
-        start = np.random.randint(0, 36, (count, 1))
-        return np.hstack((centers, start))
+    def _load(self, i):
+        return torch.load(self.block_dir / f"block{i}")[0].to(torch.float32)
 
-    def fetch_slice(self, block, bound):
-        cx, cy, start = bound[0], bound[1], bound[2]
-        sx, ex, sy, ey = self._bounds(cx, cy, length=128)
-        X = block[start : start + 12, sx:ex, sy:ey]
-        sx, ex, sy, ey = self._bounds(cx, cy, length=64)
-        y = block[start + 12 : start + 36, sx:ex, sy:ey]
+    def _isolate(self, crop, start_idx):
+        X = crop[start_idx : start_idx + 12]
+        y = self.center(crop[start_idx + 12 : start_idx + 36])
         return X, y
 
     def __iter__(self) -> Iterator[T_co]:
         worker_info = torch.utils.data.get_worker_info()
         if worker_info:
-            count = int(ceil(self.count / worker_info.num_workers))
-            print(f"Worker {worker_info.id} initialized")
-        else:
-            count = self.count
+            n = worker_info.num_workers
+            self.id = worker_info.id
+            self.config["num_examples"] = int(ceil(self.config["num_examples"] / n))
+            self.window_start = (
+                1 + (self.config["max_example_idx"] // n) * worker_info.id
+            )
+            logging.debug(
+                f"Worker {self.id} initialized: start - {self.window_start}, count - {self.config['num_examples']}"
+            )
 
-        bounds = self._gen_slice_bounds(count)
-        block_ids = np.random.randint(0, len(self.cached_blocks), size=(count,))
-
-        return map(
-            lambda x: self.fetch_slice(self.cached_blocks[x[0]], x[1]),
-            zip(block_ids, bounds),
-        )
+        self.cache.appendleft(self._load(self.window_start))
+        self.window_start += 1
+        while self.count < self.config["num_examples"]:
+            block = self.cache[-1]
+            crops = [self.crop(block) for _ in range(self.config["num_crops"])]
+            for crop in crops:
+                for start_time in range(self.config["examples_per_crop"]):
+                    X, y = self._isolate(crop, start_time)
+                    yield X, y
+                    self.count += 1
+                    logging.debug(f"Worker {self.id}: wrote example {self.count}")
+            self.cache.pop()
+            self.cache.appendleft(self._load(self.window_start))
+            self.window_start += 1
