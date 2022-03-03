@@ -6,12 +6,18 @@ from torchvision.transforms import CenterCrop, RandomCrop
 from collections import deque
 import pathlib
 import torch
-import concurrent.futures
 import logging
 
 
 class ClimateHackDataset(IterableDataset):
-    def __init__(self, block_directory, cache_size=16, count=10000) -> None:
+    def __init__(
+        self,
+        block_directory,
+        device: torch.device,
+        cache_size=16,
+        count=10000,
+        train=True,
+    ) -> None:
         super().__init__()
         self.block_dir = pathlib.Path(block_directory)
         self.config = {
@@ -19,7 +25,8 @@ class ClimateHackDataset(IterableDataset):
             "num_examples": count,
             "examples_per_crop": 36,
             "num_crops": 28,
-            "max_example_idx": 596,
+            "max_example_idx": 447,
+            "device": device,
         }
         assert (
             count
@@ -33,12 +40,19 @@ class ClimateHackDataset(IterableDataset):
         self.count = 0
         self.cache = deque([])
         self.id = 0
+        if not train:
+            self.window_start = 448
+            self.config["max_example_idx"] = 596
 
     def __len__(self):
         return self.config["num_examples"]
 
     def _load(self, i):
-        return torch.load(self.block_dir / f"block{i}")[0].to(torch.float32)
+        return (
+            torch.load(self.block_dir / f"block{i}")[0]
+            .to(torch.float32)
+            .to(self.config["device"])
+        )
 
     def _isolate(self, crop, start_idx):
         X = crop[start_idx : start_idx + 12]
@@ -57,6 +71,10 @@ class ClimateHackDataset(IterableDataset):
             logging.debug(
                 f"Worker {self.id} initialized: start - {self.window_start}, count - {self.config['num_examples']}"
             )
+        else:
+            self.window_start = 1
+
+        self.count = 0
 
         self.cache.appendleft(self._load(self.window_start))
         self.window_start += 1
@@ -69,6 +87,8 @@ class ClimateHackDataset(IterableDataset):
                     yield X, y
                     self.count += 1
                     logging.debug(f"Worker {self.id}: wrote example {self.count}")
+                    if self.count >= self.config["num_examples"]:
+                        return
             self.cache.pop()
             self.cache.appendleft(self._load(self.window_start))
             self.window_start += 1
