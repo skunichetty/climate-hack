@@ -2,7 +2,7 @@ import numpy as np
 import torch
 
 from climatehack import BaseEvaluator
-from model import Model
+from model import Seq2Seqv2
 
 
 class Evaluator(BaseEvaluator):
@@ -11,8 +11,12 @@ class Evaluator(BaseEvaluator):
 
         In this case, it loads the trained model (in evaluation mode)."""
 
-        self.model = Model()
-        self.model.load_state_dict(torch.load("model.pt"))
+        self.model = Seq2Seqv2()
+        self.model.load_state_dict(
+            torch.load("epoch9.pth", map_location=torch.device("cpu"))[
+                "state_dict"
+            ]
+        )
         self.model.eval()
 
     def predict(self, coordinates: np.ndarray, data: np.ndarray) -> np.ndarray:
@@ -31,9 +35,8 @@ class Evaluator(BaseEvaluator):
 
         with torch.no_grad():
             prediction = (
-                self.model(torch.from_numpy(data).view(-1, 12 * 128 * 128))
+                self.model(torch.from_numpy(data).view(1, 12, 128, 128))
                 .view(24, 64, 64)
-                .detach()
                 .numpy()
             )
 

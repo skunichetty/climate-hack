@@ -68,7 +68,9 @@ class BaseEvaluator:
             List[np.ndarray]: The predictions.
         """
 
-        return [self.predict(*datum) for datum in zip(group["osgb"], group["data"])]
+        return [
+            self.predict(*datum) for datum in zip(group["osgb"], group["data"])
+        ]
 
     def evaluate(self):
         """Evaluates the user's model on DOXA.
@@ -96,7 +98,9 @@ class BaseEvaluator:
             try:
                 predictions = self._evaluate_group(group_data)
             except Exception as err:
-                raise Exception(f"Error while processing {group_path}: {str(err)}")
+                raise Exception(
+                    f"Error while processing {group_path}: {str(err)}"
+                )
 
             # save the output group predictions
             np.savez(

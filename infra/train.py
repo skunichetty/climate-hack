@@ -5,6 +5,10 @@ from collections.abc import Callable
 from typing import List
 from tqdm import tqdm
 
+# Need
+# - evaluation policy -> dictates how models are evaluated
+# - update policy -> dictates how models are updated
+
 
 class Metrics:
     """
@@ -27,7 +31,8 @@ class Metrics:
 
 class Evaluator:
     """
-    A wrapper around training tools to easily train and validate model performance
+    A wrapper around training tools to easily train and validate model performance. To make this function work,
+    define a single iteration training epoch closure
     """
 
     def __init__(
@@ -37,6 +42,14 @@ class Evaluator:
         optimizer: torch.optim.Optimizer,
         predictor: Callable,
         metrics: Metrics,
+        eval_function: Callable[
+            [
+                torch.Tensor,
+                torch.Tensor,
+            ],
+            torch.Tensor,
+        ] = None,
+        calc_score=False,
     ):
         """
         `Evaluator` constructor. Note that all objects passed must already be initialized and configured
@@ -49,6 +62,7 @@ class Evaluator:
             optimizer (torch.optim.Optimizer): Optimization algorithm to use. This instance must already be initialized with the model's parameters and all configurations.
             predictor (Callable): Transformation from raw logits to labels. Defaults to None (as used in regression tasks).
             metrics (Metrics): Set of metrics to evaluate model with.
+            eval_function (Callable): The method of fetching the output of the model.
         """
         self.model = model
         self.loss_fn = loss_fn
@@ -57,6 +71,14 @@ class Evaluator:
         self.predictor = predictor
         self.train_loss, self.val_loss = [], []
         self.train_metrics, self.val_metrics = [], []
+        if not eval_function:
+            self.eval_function = lambda model, x, y: model(x)
+        else:
+            self.eval_function = eval_function
+        if calc_score:
+            self.scorer = lambda x: torch.nn.functional.softmax(x.data, dim=1)
+        else:
+            self.scorer = lambda x: None
 
     def _evaluate(self, X: torch.tensor, y: torch.tensor):
         """
@@ -69,9 +91,9 @@ class Evaluator:
         Returns:
             tuple: Tuple of (prediction, class score (for classification), loss value)
         """
-        output = self.model(X)
+        output = self.eval_function(self.model, X, y)
         predicted = self.predictor(output)
-        score = torch.nn.functional.softmax(output.data, dim=1)
+        score = self.scorer(output.data)
         l = self.loss_fn(output, y)
         return predicted, score, l
 
@@ -97,10 +119,10 @@ class Evaluator:
         if not train:
             self.model.eval()
             with torch.no_grad():
-                predicted, score, l = self._evaluate(X, y, self.predictor)
+                predicted, score, l = self._evaluate(X, y)
             self.model.train()
         else:
-            predicted, score, l = self._evaluate(X, y, self.predictor)
+            predicted, score, l = self._evaluate(X, y)
         return predicted, score, l
 
     def _fbkpass(
@@ -166,37 +188,26 @@ class Evaluator:
         self.model.eval()
         with torch.no_grad():
             val_metrics, val_loss = self._fbkpass(
-                validation_set, self.val_loss, self.val_metrics, self._evaluate, verbose
+                validation_set,
+                self.val_loss,
+                self.val_metrics,
+                self._evaluate,
+                verbose,
             )
 
         self.model.train()
         return val_metrics, val_loss
 
+    def _epoch_history(self, arr, batch_size, num_examples):
+        freq = batch_size // num_examples
+        return arr[::freq]
 
-def train(
-    model: infra.model_base.ModelBase,
-    loss_fn,
-    optimizer: torch.optim.Optimizer,
-    train: DataLoader,
-    validation: DataLoader,
-    metrics: Metrics,
-    num_epochs,
-    verbose=True,
-):
-    predictor = lambda x: torch.argmax(x, dim=1)
-    evaluator = Evaluator(model, loss_fn, optimizer, predictor, metrics)
-    for epoch in range(num_epochs):
-        if verbose:
-            print("═" * 10 + f" Epoch {epoch+1} " + "═" * 10)
-            print("Training pass: ", end="")
-            train_loss, _ = evaluator.train_epoch(train, verbose)
-            print("Validation pass: ", end="")
-            val_loss, _ = evaluator.validate(validation, verbose)
-        if verbose:
-            print(f"Train Loss: {train_loss}, Val Loss: {val_loss}")
-    return (
-        evaluator.train_loss,
-        evaluator.train_metrics,
-        evaluator.val_loss,
-        evaluator.val_metrics,
-    )
+    def train_epoch_history(self, batch_size, num_examples):
+        return self._epoch_history(
+            self.train_loss, batch_size, num_examples
+        ), self._epoch_history(self.train_metrics, batch_size, num_examples)
+
+    def val_epoch_history(self, batch_size, num_examples):
+        return self._epoch_history(
+            self.val_loss, batch_size, num_examples
+        ), self._epoch_history(self.val_metrics, batch_size, num_examples)

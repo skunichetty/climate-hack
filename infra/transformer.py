@@ -5,9 +5,13 @@ class SHSAttention(torch.nn.Module):
     def __init__(self, embedding_size=512, output_size=64, mask=False):
         super(SHSAttention, self).__init__()
 
-        self.wquery = torch.nn.Parameter(torch.empty(embedding_size, output_size))
+        self.wquery = torch.nn.Parameter(
+            torch.empty(embedding_size, output_size)
+        )
         self.wkey = torch.nn.Parameter(torch.empty(embedding_size, output_size))
-        self.wvalue = torch.nn.Parameter(torch.empty(embedding_size, output_size))
+        self.wvalue = torch.nn.Parameter(
+            torch.empty(embedding_size, output_size)
+        )
 
         self.softmax = torch.nn.Softmax(dim=1)
         self.register_buffer("output_size", torch.tensor([output_size]))
@@ -22,7 +26,9 @@ class SHSAttention(torch.nn.Module):
     def forward(self, x):
         q, k, v = x @ self.wquery, x @ self.wkey, x @ self.wvalue
         a = q @ k.T
-        mask = torch.zeros_like(a) if self.mask else torch.triu(a) * float("-inf")
+        mask = (
+            torch.zeros_like(a) if self.mask else torch.triu(a) * float("-inf")
+        )
         return self.softmax((a + mask) / torch.sqrt(self.output_size)) @ v
 
     def __repr__(self):
@@ -35,9 +41,14 @@ class SelfAttention(torch.nn.Module):
         self.embedding_size = embedding_size
         self.hidden_size = hidden_size
         self.heads = torch.nn.ModuleList(
-            [SHSAttention(embedding_size, hidden_size, mask) for _ in range(heads)]
+            [
+                SHSAttention(embedding_size, hidden_size, mask)
+                for _ in range(heads)
+            ]
         )
-        self.w0 = torch.nn.Parameter(torch.empty(heads * hidden_size, embedding_size))
+        self.w0 = torch.nn.Parameter(
+            torch.empty(heads * hidden_size, embedding_size)
+        )
         torch.nn.init.kaiming_normal_(self.w0, nonlinearity="relu")
 
     def forward(self, x):
@@ -53,9 +64,13 @@ class SHEDAttention(torch.nn.Module):
     def __init__(self, embedding_size=512, output_size=64):
         super(SHEDAttention, self).__init__()
 
-        self.wquery = torch.nn.Parameter(torch.empty(embedding_size, output_size))
+        self.wquery = torch.nn.Parameter(
+            torch.empty(embedding_size, output_size)
+        )
         self.wkey = torch.nn.Parameter(torch.empty(embedding_size, output_size))
-        self.wvalue = torch.nn.Parameter(torch.empty(embedding_size, output_size))
+        self.wvalue = torch.nn.Parameter(
+            torch.empty(embedding_size, output_size)
+        )
 
         self.softmax = torch.nn.Softmax(dim=1)
         self.register_buffer("output_size", torch.tensor([output_size]))
@@ -82,7 +97,9 @@ class EncDecAttention(torch.nn.Module):
         self.heads = torch.nn.ModuleList(
             [SHEDAttention(embedding_size, hidden_size) for _ in range(heads)]
         )
-        self.w0 = torch.nn.Parameter(torch.empty(heads * hidden_size, embedding_size))
+        self.w0 = torch.nn.Parameter(
+            torch.empty(heads * hidden_size, embedding_size)
+        )
         torch.nn.init.kaiming_normal_(self.w0, nonlinearity="relu")
 
     def forward(self, x, hidden):
@@ -118,9 +135,33 @@ class TransformerNN(torch.nn.Module):
         return f"DenseNN(size={self.size})"
 
 
+class FourierEncoder2d(torch.nn.Module):
+    def __init__(self, p, d_model, seq_length):
+        super(FourierEncoder2d, self).__init__()
+        self.dropout = torch.nn.Dropout(p=p)
+        exp = 2 * (
+            torch.div(torch.arange(d_model), 2, rounding_mode="trunc") / d_model
+        )
+        denom = 10000**exp
+        pos_encodings = torch.arange(seq_length).view(-1, 1) / denom
+        pos_encodings[:, 0::2] = torch.sin(pos_encodings[:, 0::2])
+        pos_encodings[:, 1::2] = torch.cos(pos_encodings[:, 1::2])
+        self.register_buffer("pe", pos_encodings)
+
+    def forward(self, x):
+        N, D = x.shape
+        pos_encoding = self._positional_encoding(N, D)
+        return self.dropout(x + pos_encoding * x)
+
+
 class Encoder(torch.nn.Module):
     def __init__(
-        self, embedding_size=512, hidden_size=64, heads=8, enable_pos_encoding=False
+        self,
+        seq_length,
+        embedding_size=512,
+        hidden_size=64,
+        heads=8,
+        enable_pos_encoding=False,
     ):
         super(Encoder, self).__init__()
         self.sa = SelfAttention(embedding_size, hidden_size, heads)
@@ -129,23 +170,11 @@ class Encoder(torch.nn.Module):
         self.ln2 = torch.nn.LayerNorm(embedding_size)
         self.encode_pos = enable_pos_encoding
         self.dropout = torch.nn.Dropout(p=0.1)
-
-    def positional_encoding(self, token_count, embedding_size):
-        exp = 2 * (
-            torch.div(torch.arange(embedding_size), 2, rounding_mode="trunc")
-            / embedding_size
-        )
-        denom = 10000**exp
-
-        pos_encodings = torch.arange(token_count).view(-1, 1) / denom
-        pos_encodings[:, 0::2] = torch.sin(pos_encodings[:, 0::2])
-        pos_encodings[:, 1::2] = torch.cos(pos_encodings[:, 1::2])
-        return pos_encodings
+        self.pos_encoder = FourierEncoder2d(0.4, embedding_size, seq_length)
 
     def forward(self, x):
         if self.encode_pos:
-            x += self.positional_encoding(x.shape[0], x.shape[1])
-            x = self.dropout(x)
+            x = self.pos_encoder(x)
         x += self.dropout(self.sa(x))
         x = self.ln1(x)
         x += self.dropout(self.nn(x))
@@ -155,6 +184,7 @@ class Encoder(torch.nn.Module):
 class Decoder(torch.nn.Module):
     def __init__(
         self,
+        seq_length,
         embedding_size=512,
         hidden_size=64,
         heads=8,
@@ -170,23 +200,11 @@ class Decoder(torch.nn.Module):
         self.ln3 = torch.nn.LayerNorm(embedding_size)
         self.encode_pos = enable_pos_encoding
         self.dropout = torch.nn.Dropout(p=0.1)
-
-    def positional_encoding(self, token_count, embedding_size):
-        exp = 2 * (
-            torch.div(torch.arange(embedding_size), 2, rounding_mode="trunc")
-            / embedding_size
-        )
-        denom = 10000**exp
-
-        pos_encodings = torch.arange(token_count).view(-1, 1) / denom
-        pos_encodings[:, 0::2] = torch.sin(pos_encodings[:, 0::2])
-        pos_encodings[:, 1::2] = torch.cos(pos_encodings[:, 1::2])
-        return pos_encodings
+        self.pos_encoder = FourierEncoder2d(0.4, embedding_size, seq_length)
 
     def forward(self, x, hidden):
         if self.encode_pos:
-            x += self.positional_encoding(x.shape[0], x.shape[1])
-            x = self.dropout(x)
+            x = self.pos_encoder(x)
         x += self.dropout(self.sa(x))
         x = self.ln1(x)
         x += self.dropout(self.eda(x, hidden))
@@ -200,6 +218,8 @@ class Transformer(torch.nn.Module):
         self,
         enc_count,
         dec_count,
+        enc_seq_length,
+        dec_seq_length,
         embedding_size=512,
         hidden_size=64,
         heads=8,
@@ -208,19 +228,25 @@ class Transformer(torch.nn.Module):
     ):
         super(Transformer, self).__init__(*args, **kwargs)
         self.enc_stack = torch.nn.ModuleList(
-            [Encoder(embedding_size, hidden_size, heads) for _ in range(enc_count)]
+            [
+                Encoder(enc_seq_length, embedding_size, hidden_size, heads)
+                for _ in range(enc_count)
+            ]
         )
         self.enc_stack[0].encode_pos = True
         self.dec_stack = torch.nn.ModuleList(
-            [Decoder(embedding_size, hidden_size, heads) for _ in range(dec_count)]
+            [
+                Decoder(dec_seq_length, embedding_size, hidden_size, heads)
+                for _ in range(dec_count)
+            ]
         )
         self.dec_stack[0].encode_pos = True
 
-    def forward(self, x):
+    def forward(self, x, y):
         z = x.clone()
         for enc in self.enc_stack:
             z = enc(z)
-        o = x.clone()
+        o = y
         for dec in self.dec_stack:
             o = dec(o, z)
         return o

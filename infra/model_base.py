@@ -14,7 +14,9 @@ class ModelBase(torch.nn.Module):
     Note: Only top level modules should extend this class - all other submodules should style defer to `torch.nn.Module`.
     """
 
-    def __init__(self, checkpoint_dir: Union[str, os.PathLike], *args, **kwargs):
+    def __init__(
+        self, checkpoint_dir: Union[str, os.PathLike], *args, **kwargs
+    ):
         """
         Initializes a model.
 
@@ -92,8 +94,7 @@ class ModelBase(torch.nn.Module):
                 param_count = self._param_count_cache[idx]
             return f"{name}: {module} - {param_count} parameters"
 
-        module_it = self.named_modules()
-        next(module_it)
+        module_it = self.named_children()
         output.append("Model:")
         output.append("═" * length)
         module_map = map(extract, enumerate(module_it))

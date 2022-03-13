@@ -4,4 +4,10 @@ temp
 .vscode
 *.zarr
 tmp
+.ipynb_checkpoints
 examples
+checkpoint
+targets.npz
+features.npz
+train_loss.pickle
+val_loss.pickle
